@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Floofies: Cute Merge Puzzle</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    background: linear-gradient(180deg, #ffecd2 0%, #fcb69f 100%);
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    overflow: hidden; touch-action: none;
+  }
+  #hud {
+    width: min(360px, 94vw);
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 8px; background: rgba(255,255,255,0.85);
+    padding: 8px 16px; border-radius: 18px; box-shadow: 0 6px 15px rgba(0,0,0,0.08);
+  }
+  .stat { text-align: center; }
+  .stat span { display: block; font-size: 11px; color: #888; font-weight: bold; text-transform: uppercase; }
+  .stat strong { font-size: 20px; color: #ff6b81; }
+  #next-box { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: bold; color: #555; }
+  #next-preview { width: 30px; height: 30px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 2px 6px rgba(0,0,0,0.15); }
+  /* FIX: fixed 2:3 aspect ratio, scales down on small screens without squashing */
+  #game-wrap {
+    position: relative;
+    width: min(360px, 94vw, calc((100vh - 90px) * 2 / 3));
+    aspect-ratio: 2 / 3;
+    background: rgba(255,255,255,0.72); border: 5px solid #fff; border-radius: 24px;
+    box-shadow: 0 12px 30px rgba(0,0,0,0.12); overflow: hidden;
+  }
+  canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+  #overlay {
+    position: absolute; inset: 0; background: rgba(45,35,55,0.88);
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    color: #fff; text-align: center; padding: 20px; gap: 12px;
+  }
+  #overlay h2 { font-size: 32px; color: #ffd166; }
+  #overlay p { font-size: 18px; }
+  button {
+    background: linear-gradient(135deg, #ff758c, #ff7eb3); border: none; color: #fff;
+    padding: 13px 30px; font-size: 17px; font-weight: bold; border-radius: 30px; cursor: pointer;
+    box-shadow: 0 6px 15px rgba(255,117,140,0.4); min-width: 220px;
+  }
+  button.alt { background: linear-gradient(135deg, #38b6ff, #5ce1e6); box-shadow: 0 6px 15px rgba(56,182,255,0.4); }
+  button:active { transform: scale(0.96); }
+  #toast {
+    position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%);
+    background: rgba(40,30,50,0.9); color: #fff; padding: 8px 16px; border-radius: 16px;
+    font-size: 13px; display: none; z-index: 5; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <div class="stat"><span>Score</span><strong id="score">0</strong></div>
+  <div id="next-box">NEXT <div id="next-preview"></div></div>
+  <div class="stat"><span>Best</span><strong id="best">0</strong></div>
+</div>
+
+<div id="game-wrap">
+  <canvas id="game" width="360" height="540"></canvas>
+  <div id="toast"></div>
+  <div id="overlay">
+    <h2 id="ov-title">Overflow!</h2>
+    <p id="ov-text">Final Score: <span id="final-score">0</span></p>
+    <button id="btn-continue" class="alt">▶ Continue (Watch Ad)</button>
+    <button id="btn-keep" class="alt" style="display:none">Keep Playing</button>
+    <button id="btn-again">Play Again</button>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const DANGER_Y = 85;
+const hasAndroid = (typeof Android !== 'undefined');
+
+const FLOOF_TYPES = [
+  { val: 2,    r: 18, color: '#ff9aa2', cheek: '#ff6f7d', label: '2' },
+  { val: 4,    r: 23, color: '#ffb7b2', cheek: '#ff8a82', label: '4' },
+  { val: 8,    r: 29, color: '#ffdac1', cheek: '#f7b283', label: '8' },
+  { val: 16,   r: 35, color: '#e2f0cb', cheek: '#b5d67e', label: '16' },
+  { val: 32,   r: 42, color: '#b5ead7', cheek: '#6fd1ae', label: '32' },
+  { val: 64,   r: 50, color: '#c7ceea', cheek: '#8e9bd6', label: '64' },
+  { val: 128,  r: 58, color: '#f3b0c3', cheek: '#e07a98', label: '128' },
+  { val: 256,  r: 67, color: '#ffd166', cheek: '#f4a261', label: '256' },
+  { val: 512,  r: 76, color: '#a0c4ff', cheek: '#5e97f6', label: '512' },
+  { val: 1024, r: 86, color: '#bdb2ff', cheek: '#8372f5', label: '1024' },
+  { val: 2048, r: 96, color: '#ff6b6b', cheek: '#d93838', label: '2048' }
+];
+const LAST = FLOOF_TYPES.length - 1;
+
+let balls = [], particles = [];
+let score = 0, best = 0;
+try { best = Number(localStorage.getItem('floof_best') || 0); } catch (e) {}
+let currentType = 0, nextType = 0, aimX = W / 2;
+let canDrop = true, gameOver = false, paused = false, overflowTimer = 0;
+let continueUsed = false, winShown = false, gamesPlayed = 0, dropTimer = null;
+
+document.getElementById('best').textContent = best;
+
+// FIX: AudioContext is created lazily on first user gesture (autoplay policy safe)
+let audioCtx = null;
+function getAudio() {
+  if (!audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (AC) { try { audioCtx = new AC(); } catch (e) {} }
+  }
+  return audioCtx;
+}
+function playPop(freq = 320) {
+  const ac = getAudio();
+  if (!ac) return;
+  if (ac.state === 'suspended') ac.resume();
+  const osc = ac.createOscillator(), gain = ac.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(freq, ac.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(freq * 1.6, ac.currentTime + 0.12);
+  gain.gain.setValueAtTime(0.18, ac.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.14);
+  osc.connect(gain); gain.connect(ac.destination);
+  osc.start(); osc.stop(ac.currentTime + 0.15);
+}
+
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.style.display = 'block';
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { t.style.display = 'none'; }, 2200);
+}
+
+function randomSpawnIndex() { return Math.floor(Math.random() * 4); }
+
+function updateNextPreview() {
+  document.getElementById('next-preview').style.background = FLOOF_TYPES[nextType].color;
+}
+
+function setScore(v) {
+  score = v;
+  document.getElementById('score').textContent = score;
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('floof_best', best); } catch (e) {}
+    document.getElementById('best').textContent = best;
+  }
+}
+
+function spawnParticles(x, y, color) {
+  for (let i = 0; i < 12; i++) {
+    const a = (Math.PI * 2 * i) / 12, sp = 2 + Math.random() * 3;
+    particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 1, color });
+  }
+}
+
+function dropBall() {
+  if (!canDrop || gameOver || paused) return;
+  const spec = FLOOF_TYPES[currentType];
+  const cx = Math.max(spec.r + 4, Math.min(W - spec.r - 4, aimX));
+  balls.push({ x: cx, y: 45, vx: (Math.random() - 0.5) * 0.4, vy: 1, type: currentType, r: spec.r, scale: 1, age: 0 });
+  playPop(260);
+  canDrop = false;
+  currentType = nextType;
+  nextType = randomSpawnIndex();
+  updateNextPreview();
+  clearTimeout(dropTimer);
+  dropTimer = setTimeout(() => { canDrop = true; }, 420);
+}
+
+function drawFloof(x, y, typeIdx, scale = 1) {
+  const f = FLOOF_TYPES[typeIdx], r = f.r * scale;
+  ctx.save(); ctx.translate(x, y);
+  ctx.fillStyle = f.color; ctx.beginPath();
+  const bumps = 18;
+  for (let i = 0; i <= bumps * 2; i++) {
+    const a = (i * Math.PI) / bumps, rad = i % 2 === 0 ? r : r * 0.93;
+    const px = Math.cos(a) * rad, py = Math.sin(a) * rad;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath(); ctx.fill();
+  ctx.lineWidth = 2.5; ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.stroke();
+
+  const ex = r * 0.28, ey = -r * 0.08;
+  ctx.fillStyle = '#333'; ctx.beginPath();
+  ctx.arc(-ex, ey, Math.max(2.2, r * 0.09), 0, Math.PI * 2);
+  ctx.arc(ex, ey, Math.max(2.2, r * 0.09), 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.beginPath();
+  ctx.arc(-ex - 1, ey - 1, Math.max(1, r * 0.035), 0, Math.PI * 2);
+  ctx.arc(ex - 1, ey - 1, Math.max(1, r * 0.035), 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = f.cheek; ctx.beginPath();
+  ctx.arc(-ex * 1.25, ey + r * 0.16, r * 0.11, 0, Math.PI * 2);
+  ctx.arc(ex * 1.25, ey + r * 0.16, r * 0.11, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#333'; ctx.lineWidth = 2; ctx.beginPath();
+  ctx.arc(0, ey + r * 0.08, r * 0.14, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+  ctx.fillStyle = 'rgba(51,51,51,0.75)';
+  ctx.font = `bold ${Math.max(11, Math.floor(r * 0.34))}px sans-serif`;
+  ctx.textAlign = 'center'; ctx.fillText(f.label, 0, r * 0.62);
+  ctx.restore();
+}
+
+// ---------- PHYSICS (FIX: 3 solver iterations = stable stacking, merge separated) ----------
+function clampWalls(b, bounce) {
+  if (b.x - b.r < 0) { b.x = b.r; b.vx *= -bounce; }
+  if (b.x + b.r > W) { b.x = W - b.r; b.vx *= -bounce; }
+  if (b.y + b.r > H) { b.y = H - b.r; b.vy *= -bounce; }
+}
+
+function resolveCollisions(applyImpulse) {
+  for (let i = 0; i < balls.length; i++) {
+    for (let j = i + 1; j < balls.length; j++) {
+      const a = balls[i], b = balls[j];
+      const dx = b.x - a.x, dy = b.y - a.y, dist = Math.hypot(dx, dy), minDist = a.r + b.r;
+      if (dist >= minDist || dist === 0) continue;
+      const nx = dx / dist, ny = dy / dist, overlap = (minDist - dist) * 0.5;
+      a.x -= nx * overlap; a.y -= ny * overlap;
+      b.x += nx * overlap; b.y += ny * overlap;
+      if (applyImpulse) {
+        const dvn = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+        if (dvn < 0) {
+          const p = dvn * 0.5;
+          a.vx += p * nx; a.vy += p * ny;
+          b.vx -= p * nx; b.vy -= p * ny;
+        }
+      }
+    }
+  }
+}
+
+function mergePass() {
+  const dead = new Set(), born = [];
+  for (let i = 0; i < balls.length; i++) {
+    if (dead.has(i)) continue;
+    for (let j = i + 1; j < balls.length; j++) {
+      if (dead.has(j)) continue;
+      const a = balls[i], b = balls[j];
+      if (a.type !== b.type) continue;
+      if (Math.hypot(b.x - a.x, b.y - a.y) > a.r + b.r + 1.5) continue;
+      dead.add(i); dead.add(j);
+      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      if (a.type === LAST) {
+        // FIX: two 2048s pop away for a big bonus (no dead end)
+        setScore(score + 4096);
+        spawnParticles(mx, my, FLOOF_TYPES[LAST].color);
+        playPop(900);
+        toast('MEGA POP! +4096');
+      } else {
+        const ni = a.type + 1;
+        born.push({ x: mx, y: my, vx: 0, vy: -1.5, type: ni, r: FLOOF_TYPES[ni].r, scale: 1.35, age: 60 });
+        setScore(score + FLOOF_TYPES[ni].val);
+        spawnParticles(mx, my, FLOOF_TYPES[ni].color);
+        playPop(340 + ni * 45);
+        if (ni === LAST && !winShown) { winShown = true; showOverlay('win'); }
+      }
+      break;
+    }
+  }
+  if (dead.size) balls = balls.filter((_, idx) => !dead.has(idx)).concat(born);
+}
+
+function stepPhysics() {
+  const gravity = 0.42, friction = 0.985, bounce = 0.25;
+  for (const b of balls) {
+    b.age++;
+    b.scale += (1 - b.scale) * 0.2;
+    b.vy += gravity; b.vx *= friction; b.vy *= friction;
+    b.x += b.vx; b.y += b.vy;
+    clampWalls(b, bounce);
+  }
+  for (let it = 0; it < 3; it++) {
+    resolveCollisions(it === 0);
+    for (const b of balls) clampWalls(b, bounce);
+  }
+  mergePass();
+
+  let above = false;
+  for (const b of balls) {
+    if (b.age > 60 && b.y - b.r < DANGER_Y && Math.abs(b.vy) < 3) { above = true; break; }
+  }
+  if (above) { overflowTimer++; if (overflowTimer > 90) triggerGameOver(); }
+  else overflowTimer = 0;
+}
+
+// ---------- OVERLAY / GAME FLOW ----------
+function showOverlay(mode) {
+  const ov = document.getElementById('overlay');
+  const bc = document.getElementById('btn-continue');
+  const bk = document.getElementById('btn-keep');
+  const ba = document.getElementById('btn-again');
+  const title = document.getElementById('ov-title');
+  const text = document.getElementById('ov-text');
+  if (mode === 'win') {
+    paused = true;
+    title.textContent = '🎉 You made 2048!';
+    text.innerHTML = 'Score: ' + score;
+    bc.style.display = 'none'; bk.style.display = 'inline-block'; ba.style.display = 'none';
+  } else {
+    title.textContent = 'Overflow!';
+    text.innerHTML = 'Final Score: <span id="final-score">' + score + '</span>';
+    bc.style.display = continueUsed ? 'none' : 'inline-block';
+    bk.style.display = 'none'; ba.style.display = 'inline-block';
+  }
+  ov.style.display = 'flex';
+}
+function hideOverlay() { document.getElementById('overlay').style.display = 'none'; }
+
+function triggerGameOver() { gameOver = true; showOverlay('over'); }
+
+function grantContinue() {
+  continueUsed = true;
+  // clear the top of the pile so the player has room
+  const keep = [];
+  for (const b of balls) {
+    if (b.y - b.r < DANGER_Y + 130) spawnParticles(b.x, b.y, FLOOF_TYPES[b.type].color);
+    else keep.push(b);
+  }
+  balls = keep;
+  overflowTimer = 0; gameOver = false; canDrop = true;
+  hideOverlay();
+  toast('Extra life! Top cleared');
+}
+
+window.onRewardResult = function (ok, reason) {
+  if (ok) grantContinue();
+  else toast(reason === 'skipped' ? 'Watch the full ad to continue' : 'Ad not ready, try again in a moment');
+};
+
+function requestContinue() {
+  if (continueUsed) return;
+  if (hasAndroid) Android.showRewarded();
+  else grantContinue(); // browser testing
+}
+
+function resetGame() {
+  clearTimeout(dropTimer);
+  balls = []; particles = [];
+  setScore(0);
+  overflowTimer = 0; gameOver = false; paused = false; canDrop = true;
+  continueUsed = false; winShown = false;
+  currentType = randomSpawnIndex(); nextType = randomSpawnIndex();
+  updateNextPreview();
+  hideOverlay();
+}
+
+function playAgain() {
+  gamesPlayed++;
+  if (hasAndroid && gamesPlayed % 2 === 0) Android.showInterstitial(); // interstitial every 2nd game
+  resetGame();
+}
+
+document.getElementById('btn-continue').addEventListener('click', requestContinue);
+document.getElementById('btn-again').addEventListener('click', playAgain);
+document.getElementById('btn-keep').addEventListener('click', () => { paused = false; hideOverlay(); });
+
+// ---------- MAIN LOOP ----------
+function loop() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  ctx.strokeStyle = overflowTimer > 0 ? '#ff4d6d' : 'rgba(255,107,129,0.45)';
+  ctx.setLineDash([8, 6]); ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(0, DANGER_Y); ctx.lineTo(W, DANGER_Y); ctx.stroke();
+  ctx.restore();
+
+  if (canDrop && !gameOver && !paused) {
+    const spec = FLOOF_TYPES[currentType];
+    const cx = Math.max(spec.r + 4, Math.min(W - spec.r - 4, aimX));
+    ctx.strokeStyle = 'rgba(255,255,255,0.65)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(cx, 45); ctx.lineTo(cx, H); ctx.stroke();
+    drawFloof(cx, 45, currentType, 1);
+  }
+
+  if (!gameOver && !paused) stepPhysics();
+  for (const b of balls) drawFloof(b.x, b.y, b.type, b.scale);
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy; p.life -= 0.04;
+    if (p.life <= 0) { particles.splice(i, 1); continue; }
+    ctx.globalAlpha = p.life; ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+  requestAnimationFrame(loop);
+}
+
+// ---------- INPUT (FIX: touchstart sets aim, so a plain tap drops in the right place) ----------
+function updateAim(clientX) {
+  const rect = canvas.getBoundingClientRect();
+  aimX = ((clientX - rect.left) / rect.width) * W;
+}
+canvas.addEventListener('mousemove', e => updateAim(e.clientX));
+canvas.addEventListener('click', e => { getAudio(); updateAim(e.clientX); dropBall(); });
+canvas.addEventListener('touchstart', e => { getAudio(); e.preventDefault(); updateAim(e.touches[0].clientX); }, { passive: false });
+canvas.addEventListener('touchmove', e => { e.preventDefault(); updateAim(e.touches[0].clientX); }, { passive: false });
+canvas.addEventListener('touchend', e => { e.preventDefault(); dropBall(); }, { passive: false });
+
+currentType = randomSpawnIndex();
+nextType = randomSpawnIndex();
+updateNextPreview();
+loop();
+</script>
+</body>
+</html>
